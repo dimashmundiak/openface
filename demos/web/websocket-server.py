@@ -25,6 +25,9 @@ txaio.use_twisted()
 
 from autobahn.twisted.websocket import WebSocketServerProtocol, \
     WebSocketServerFactory
+from twisted.internet import task, defer
+from twisted.internet.ssl import DefaultOpenSSLContextFactory
+
 from twisted.python import log
 from twisted.internet import reactor
 
@@ -54,6 +57,9 @@ import openface
 modelDir = os.path.join(fileDir, '..', '..', 'models')
 dlibModelDir = os.path.join(modelDir, 'dlib')
 openfaceModelDir = os.path.join(modelDir, 'openface')
+# For TLS connections
+tls_crt = os.path.join(fileDir, 'tls', 'server.crt')
+tls_key = os.path.join(fileDir, 'tls', 'server.key')
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dlibFacePredictor', type=str, help="Path to dlib's face predictor.",
@@ -62,7 +68,7 @@ parser.add_argument('--networkModel', type=str, help="Path to Torch network mode
                     default=os.path.join(openfaceModelDir, 'nn4.small2.v1.t7'))
 parser.add_argument('--imgDim', type=int,
                     help="Default image dimension.", default=96)
-parser.add_argument('--cuda', type=bool, default=False)
+parser.add_argument('--cuda', action='store_true')
 parser.add_argument('--unknown', type=bool, default=False,
                     help='Try to predict unknown people')
 parser.add_argument('--port', type=int, default=9000,
@@ -81,7 +87,6 @@ _face_center = faceapi.share_center(
     os.path.join(fileDir, 'facedb.db3'),
     os.path.join(fileDir, 'db_face'))
 
-
 class Face:
 
     def __init__(self, rep, identity):
@@ -96,15 +101,15 @@ class Face:
 
 
 class OpenFaceServerProtocol(WebSocketServerProtocol):
-
     def __init__(self):
+        super(OpenFaceServerProtocol, self).__init__()
         self.images = {}
         self.training = True
         self.people = []
         self.svm = None
         if args.unknown:
             self.unknownImgs = np.load("./examples/web/unknown.npy")
-        self.initFaceDB()
+            self.initFaceDB()
 
     def initFaceDB(self):
         # for info in _face_db.dbList():
@@ -213,11 +218,10 @@ class OpenFaceServerProtocol(WebSocketServerProtocol):
     def loadState(self, jsImages, training, jsPeople):
         self.training = training
 
-        # init it from initFaceDB
-        # for jsImage in jsImages:
-        #     h = jsImage['hash'].encode('ascii', 'ignore')
-        #     self.images[h] = Face(np.array(jsImage['representation']),
-        #                           jsImage['identity'])
+        #for jsImage in jsImages:
+         #   h = jsImage['hash'].encode('ascii', 'ignore')
+          #  self.images[h] = Face(np.array(jsImage['representation']),
+           #                       jsImage['identity'])
 
         for jsPerson in jsPeople:
             self.people.append(jsPerson.encode('ascii', 'ignore'))
@@ -249,7 +253,6 @@ class OpenFaceServerProtocol(WebSocketServerProtocol):
 
         X = np.vstack(X)
         y = np.array(y)
-
         return (X, y)
 
     def sendTSNE(self, people):
@@ -296,7 +299,7 @@ class OpenFaceServerProtocol(WebSocketServerProtocol):
             (X, y) = d
             numIdentities = len(set(y + [-1]))
             if numIdentities <= 1:
-                print "numIdentities: {}, not train".format(numIdentities)
+                 print "numIdentities: {}, not train".format(numIdentities)
                 return
 
             param_grid = [
@@ -307,7 +310,6 @@ class OpenFaceServerProtocol(WebSocketServerProtocol):
                  'kernel': ['rbf']}
             ]
             self.svm = GridSearchCV(SVC(C=1), param_grid, cv=5).fit(X, y)
-            # use pickle.dumps to save trained model
 
     def trainingFrame(self, dataURL, identity):
         head = "data:image/jpeg;base64,"
@@ -327,55 +329,27 @@ class OpenFaceServerProtocol(WebSocketServerProtocol):
             return
 
         phash = info.hash
-        msg = {
-            "type": "NEW_IMAGE",
-            "name": name,
-            "hash": phash,
-            # "content": content,
-            "identity": identity}
-        self.sendMessage(json.dumps(msg))
+                    msg = {
+                        "type": "NEW_IMAGE",
+                        "name": name,
+                        "hash": phash,
+                        # "content": content,
+                        "identity": identity}
+                    self.sendMessage(json.dumps(msg))
+                    
 
-        # bbs = _face_detector.detect(img)
-        # for face in bbs:
-        #     phash = str(imagehash.phash(Image.fromarray(face.img)))
-        #     rep = net.forward(face.img)
-        #     self.images[phash] = Face(rep, identity)
-        #     name = self.people[identity]
-        #     phash, rep_str = _face_trainer.eigenValue(face.img)
-        #     record = faceapi.database.RecordInfo(
-        #                      phash, name, rep_str, "./test.png", identity)
-        #     _face_db.addList([record])
-        #     # content = [str(x) for x in face.img.flatten()]
-        #     msg = {
-        #             "type": "NEW_IMAGE",
-        #             "name": name,
-        #             "hash": phash,
-        #             # "content": content,
-        #             "identity": identity}
-        #     self.sendMessage(json.dumps(msg))
+        def processFrame(self, dataURL, identity):
+            head = "data:image/jpeg;base64,"
+            assert(dataURL.startswith(head))
+            imgdata = base64.b64decode(dataURL[len(head):])
+            imgF = StringIO.StringIO()
+            imgF.write(imgdata)
+            imgF.seek(0)
+            img = Image.open(imgF)
 
-        # for info in trained_list:
-        #     phash = info.hash
-        #     msg = {
-        #             "type": "NEW_IMAGE",
-        #             "name": name,
-        #             "hash": phash,
-        #             # "content": content,
-        #             "identity": identity}
-        #     self.sendMessage(json.dumps(msg))
-
-    def processFrame(self, dataURL, identity):
-        head = "data:image/jpeg;base64,"
-        assert(dataURL.startswith(head))
-        imgdata = base64.b64decode(dataURL[len(head):])
-        imgF = StringIO.StringIO()
-        imgF.write(imgdata)
-        imgF.seek(0)
-        img = Image.open(imgF)
-
-        buf = np.fliplr(np.asarray(img))
-        annotatedFrame = np.copy(buf)
-        identities = []
+            buf = np.fliplr(np.asarray(img))
+            annotatedFrame = np.copy(buf)
+            identities = []
 
         def hit_callback(class_id, name, area, landmarks, score):
             # draw the face area
@@ -393,58 +367,60 @@ class OpenFaceServerProtocol(WebSocketServerProtocol):
                     radius=3,
                     color=(102, 204, 255),
                     thickness=-1)
-            # if identity == -1:
-            #     if len(self.people) == 1:
-            #         name = self.people[0]
-            #     else:
-            #         name = "Unknown"
-            # else:
-            #     print "now people: {}".format(self.people)
-            #     name = self.people[identity]
+                    # if identity == -1:
+                    #     if len(self.people) == 1:
+                    #         name = self.people[0]
+                    #     else:
+                    #         name = "Unknown"
+                    # else:
+                    #     print "now people: {}".format(self.people)
+                    #     name = self.people[identity]
+            
+                 cv2.putText(
+                    annotatedFrame,
+                    name,
+                    (area.left(), area.top() - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    fontScale=0.75,
+                    color=(152, 255, 204),
+                    thickness=2)
 
-            cv2.putText(
-                annotatedFrame,
-                name,
-                (area.left(), area.top() - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                fontScale=0.75,
-                color=(152, 255, 204),
-                thickness=2)
+            _face_center.predict(img, hit_callback)
 
-        _face_center.predict(img, hit_callback)
+            msg = {
+                "type": "IDENTITIES",
+                "identities": identities
+            }
+            self.sendMessage(json.dumps(msg))
 
-        msg = {
-            "type": "IDENTITIES",
-            "identities": identities
-        }
-        self.sendMessage(json.dumps(msg))
+            plt.figure()
+            plt.imshow(annotatedFrame)
+            plt.xticks([])
+            plt.yticks([])
 
-        plt.figure()
-        plt.imshow(annotatedFrame)
-        plt.xticks([])
-        plt.yticks([])
-
-        imgdata = StringIO.StringIO()
-        plt.savefig(imgdata, format='png')
-        imgdata.seek(0)
-        content = 'data:image/png;base64,' + \
-            urllib.quote(base64.b64encode(imgdata.buf))
-        msg = {
-            "type": "ANNOTATED",
-            "content": content
-        }
-        plt.close()
-        self.sendMessage(json.dumps(msg))
+            imgdata = StringIO.StringIO()
+            plt.savefig(imgdata, format='png')
+            imgdata.seek(0)
+            content = 'data:image/png;base64,' + \
+                urllib.quote(base64.b64encode(imgdata.buf))
+            msg = {
+                "type": "ANNOTATED",
+                "content": content
+            }
+            plt.close()
+            self.sendMessage(json.dumps(msg))
 
 if __name__ == '__main__':
     log.startLogging(sys.stdout)
 
-    # dir_path = os.path.join(fileDir, 'train_img')
-    # _face_center.trainDir(dir_path)
 
-    factory = WebSocketServerFactory("ws://localhost:{}".format(args.port),
-                                     debug=False)
+def main(reactor):
+    log.startLogging(sys.stdout)
+    factory = WebSocketServerFactory()
     factory.protocol = OpenFaceServerProtocol
+    ctx_factory = DefaultOpenSSLContextFactory(tls_key, tls_crt)
+    reactor.listenSSL(args.port, factory, ctx_factory)
+    return defer.Deferred()
 
-    reactor.listenTCP(args.port, factory)
-    reactor.run()
+if __name__ == '__main__':
+    task.react(main)
